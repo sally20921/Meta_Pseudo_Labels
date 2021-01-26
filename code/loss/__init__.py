@@ -2,8 +2,6 @@ import os
 import inspect
 from pathlib import Path
 
-from torch.nn.modules.loss import _Loss
-
 from inflection import underscore
 
 loss_dict = {}
@@ -19,7 +17,8 @@ def add_loss():
             module = eval(name)
             for member in dir(module):
                 member = getattr(module, member)
-                loss_dict[underscore(str(member.__name__))] = member
+                if (inspect.isclass(member) and str(member.__name__).endswith('Loss')):
+                    loss_dict[underscore(str(member.__name__))] = member
 
 def get_loss(args):
     loss = loss_dict[args.loss_name]

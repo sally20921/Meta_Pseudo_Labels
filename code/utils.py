@@ -43,20 +43,34 @@ def get_now():
     now = datetime.now()
     return now.strftime('%Y-%m-%d-%H-%M-%S')
 
-#def prepare_batch(args, batch):
-#    net_input_key = [*args.use_inputs]
-#    net_input = {k: batch[k] for k in net_input_key}
-#    for key, value in net_input.items():
-#        if torch.is_tensor(value):
-#            net_input[key] = value.to(args.device).contiguous()
+'''torch.Tensor
+contiguous(memory_format=torch.contiguous_format): returns a contiguous in memory tensor containing the same data as self tensor.
+view() cannot be applied to discontiguous tensor.
+'''
+# for 1 batch 
+# output: {'x_i': , 'x_j': }, target
+# batch: (x_i, x_j), target
+def prepare_batch(args, batch):
+    net_input_key = [*args.use_inputs]
+    net_input = {k: batch[0][i] for k, i in zip(net_input_key, range(len(net_input_key)))}
+    for key, value in net_input.items():
+        if torch.is_tensor(value):
+            net_input[key] = value.to(args.device).contiguous()
+
+    target = batch[1]
+    if torch.is_tensor(target):
+        target = target.to(args.device).contiguous()
+    # return batch in output form
+    return net_input, target
 
 # for 1 batch
-def prepare_batch(args, batch):
-    # batch = (inputs, targets)
-    net_input = batch[0].to(args.device).contiguous()
-    target = batch[1].to(args.device).contiguous()
-    # return batch
-    return (net_input, target)
+# output: x, target
+# batch: x, target
+def _prepare_batch(args, batch):
+    x, target = batch
+    x = x.to(args.device).contiguous()
+    target = target.to(args.device).contiguous()
+    return x, target
 
 def wait_for_key(key="y"):
     text = ""
