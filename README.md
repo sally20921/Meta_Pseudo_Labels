@@ -1,4 +1,4 @@
-# Exploring Simple Siamese Representation Learning
+# Meta Pseudo Labels
 ## Install Package
 `
 pip3 install SOTA-SSL
