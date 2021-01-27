@@ -17,6 +17,7 @@ from ignite.engine.engine import Engine, State, Events
 from ignite.metrics import Loss
 
 import numpy as np
+
 # from apex import amp
 import ignite.distributed as idist
 from ignite.contrib.engines import common
