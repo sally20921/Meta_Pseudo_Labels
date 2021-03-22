@@ -1,93 +1,106 @@
-from contextlib import contextmanager
-from datetime import datetime
-
+import logging
 import os
-import sys
-import json
-import pickle
-import re
+import shutil
+from collections import OrderedDict
 
-import six
-import numpy as np
 import torch
+from torch import distributed as dist
+from torch import nn
+from torch.nn import functional as F
 
-from config import log_keys
+logger = logging.getLogger(__name__)
 
-def load_json(path):
-    with open(path, "r", encoding='utf-8') as f:
-        return json.load(f)
 
-def save_json(data, path, **kwargs):
-    with open(path, 'w') as f:
-        json.dump(data, f, **kwargs)
+def reduce_tensor(tensor, n):
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    rt /= n
+    return rt
 
-def load_pickle(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
 
-def save_pickle(data, path):
-    with open(path, "wb") as f:
-        pickle.dump(data, f)
+def create_loss_fn(args):
+    if args.label_smoothing > 0:
+        criterion = SmoothCrossEntropy(alpha=args.label_smoothing)
+    else:
+        criterion = nn.CrossEntropyLoss()
+    return criterion.to(args.device)
 
-def get_dirname_from_args(args):
-    dirname = ''
-    for key in sorted(log_keys):
-        dirname += '_'
-        dirname += key
-        dirname += '_'
-        dirname += str(args[key])
 
-    return dirname[1:]
+def module_load_state_dict(model, state_dict):
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:]  # remove `module.`
+        new_state_dict[name] = v
+    model.load_state_dict(new_state_dict)
 
-def get_now():
-    now = datetime.now()
-    return now.strftime('%Y-%m-%d-%H-%M-%S')
 
-'''torch.Tensor
-contiguous(memory_format=torch.contiguous_format): returns a contiguous in memory tensor containing the same data as self tensor.
-view() cannot be applied to discontiguous tensor.
-'''
-# for 1 batch 
-# output: {'x_i': , 'x_j': }, target
-# batch: (x_i, x_j), target
-def prepare_batch(args, batch):
-    net_input_key = [*args.use_inputs]
-    net_input = {k: batch[0][i] for k, i in zip(net_input_key, range(len(net_input_key)))}
-    for key, value in net_input.items():
-        if torch.is_tensor(value):
-            net_input[key] = value.to(args.device).contiguous()
+def model_load_state_dict(model, state_dict):
+    try:
+        model.load_state_dict(state_dict)
+    except:
+        module_load_state_dict(model, state_dict)
 
-    target = batch[1]
-    if torch.is_tensor(target):
-        target = target.to(args.device).contiguous()
-    # return batch in output form
-    return net_input, target
 
-# for 1 batch
-# output: x, target
-# batch: x, target
-def _prepare_batch(args, batch):
-    x, target = batch
-    x = x.to(args.device).contiguous()
-    target = target.to(args.device).contiguous()
-    return x, target
+def save_checkpoint(args, state, is_best, finetune=False):
+    os.makedirs(args.save_path, exist_ok=True)
+    if finetune:
+        name = f'{args.name}_finetune'
+    else:
+        name = args.name
+    filename = f'{args.save_path}/{name}_last.pth.tar'
+    torch.save(state, filename, _use_new_zipfile_serialization=False)
+    if is_best:
+        shutil.copyfile(filename, f'{args.save_path}/{args.name}_best.pth.tar')
 
-def wait_for_key(key="y"):
-    text = ""
-    while (text != key):
-        text = six.moves.input("Press {} to quit: ".format(key))
-        if text == key:
-            print("terminating process")
-        else:
-            print("key {} unrecognizable".format(key))
 
-@contextmanager
-def suppress_stdout(do=True):
-    if do:
-        with open(os.devnull, "w") as devnull:
-            old_stdout = sys.stdout
-            sys.stdout = devnull
-            try:
-                yield
-            finally:
-                sys.stdout = old_stdout
+def accuracy(output, target, topk=(1,)):
+    output = output.to(torch.device('cpu'))
+    target = target.to(torch.device('cpu'))
+    maxk = max(topk)
+    batch_size = target.shape[0]
+
+    _, idx = output.sort(dim=1, descending=True)
+    pred = idx.narrow(1, 0, maxk).t()
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+
+    res = []
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(dim=0, keepdim=True)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
+
+
+class SmoothCrossEntropy(nn.Module):
+    def __init__(self, alpha=0.1):
+        super(SmoothCrossEntropy, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, logits, labels):
+        num_classes = logits.shape[-1]
+        alpha_div_k = self.alpha / num_classes
+        target_probs = F.one_hot(labels, num_classes=num_classes).float() * \
+            (1. - self.alpha) + alpha_div_k
+        loss = -(target_probs * torch.log_softmax(logits, dim=-1)).sum(dim=-1)
+        return loss.mean()
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value
+       Imported from https://github.com/pytorch/examples/blob/master/imagenet/main.py#L247-L262
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
